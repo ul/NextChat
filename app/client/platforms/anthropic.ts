@@ -12,6 +12,7 @@ import { ANTHROPIC_BASE_URL } from "@/app/constant";
 import { getMessageTextContent, isVisionModel } from "@/app/utils";
 import { preProcessImageContent, stream } from "@/app/utils/chat";
 import { cloudflareAIGatewayUrl } from "@/app/utils/cloudflare";
+import { getAnthropicSamplingParameters } from "@/app/utils/anthropic";
 import { RequestPayload } from "./openai";
 import { fetch } from "@/app/utils/stream";
 
@@ -185,8 +186,7 @@ export class ClaudeApi implements LLMApi {
 
       model: modelConfig.model,
       max_tokens: modelConfig.max_tokens,
-      temperature: modelConfig.temperature,
-      top_p: modelConfig.top_p,
+      ...getAnthropicSamplingParameters(modelConfig, modelConfig.model),
       // top_k: modelConfig.top_k,
       top_k: 5,
     };

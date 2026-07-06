@@ -5,6 +5,10 @@ import {
   ServiceProvider,
 } from "../constant";
 import {
+  isCloudflareAnthropicModel,
+  isCloudflareGoogleAIStudioModel,
+} from "../utils/openai";
+import {
   ChatMessageTool,
   ChatMessage,
   ModelType,
@@ -256,9 +260,25 @@ export function getHeaders(ignoreHeaders: boolean = false) {
 
   function getConfig() {
     const modelConfig = chatStore.currentSession().mask.modelConfig;
-    const isGoogle = modelConfig.providerName === ServiceProvider.Google;
+    const isCloudflareGoogleAIStudio = isCloudflareGoogleAIStudioModel(
+      modelConfig.model,
+    );
+    const isCloudflareAnthropic = isCloudflareAnthropicModel(
+      modelConfig.model,
+    );
+    const isCloudflareOpenAI = modelConfig.model
+      ?.trim()
+      .toLowerCase()
+      .startsWith("openai/");
+    const isCloudflareOpenAICompatibleModel =
+      isCloudflareGoogleAIStudio || isCloudflareAnthropic || isCloudflareOpenAI;
+    const isGoogle =
+      !isCloudflareOpenAICompatibleModel &&
+      modelConfig.providerName === ServiceProvider.Google;
     const isAzure = modelConfig.providerName === ServiceProvider.Azure;
-    const isAnthropic = modelConfig.providerName === ServiceProvider.Anthropic;
+    const isAnthropic =
+      !isCloudflareOpenAICompatibleModel &&
+      modelConfig.providerName === ServiceProvider.Anthropic;
     const isBaidu = modelConfig.providerName == ServiceProvider.Baidu;
     const isByteDance = modelConfig.providerName === ServiceProvider.ByteDance;
     const isAlibaba = modelConfig.providerName === ServiceProvider.Alibaba;
@@ -271,7 +291,13 @@ export function getHeaders(ignoreHeaders: boolean = false) {
       modelConfig.providerName === ServiceProvider.SiliconFlow;
     const isAI302 = modelConfig.providerName === ServiceProvider["302.AI"];
     const isEnabledAccessControl = accessStore.enabledAccessControl();
-    const apiKey = isGoogle
+    const apiKey = isCloudflareGoogleAIStudio
+      ? accessStore.googleApiKey || accessStore.openaiApiKey
+      : isCloudflareAnthropic
+      ? accessStore.anthropicApiKey
+      : isCloudflareOpenAI
+      ? accessStore.openaiApiKey
+      : isGoogle
       ? accessStore.googleApiKey
       : isAzure
       ? accessStore.azureApiKey

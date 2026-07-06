@@ -3,8 +3,34 @@ import { getServerSideConfig } from "../config/server";
 import { OPENAI_BASE_URL, ServiceProvider } from "../constant";
 import { cloudflareAIGatewayUrl } from "../utils/cloudflare";
 import { getModelProvider, isModelNotavailableInServer } from "../utils/model";
+import {
+  isCloudflareAnthropicModel,
+  isCloudflareGoogleAIStudioModel,
+} from "../utils/openai";
 
 const serverConfig = getServerSideConfig();
+
+function asBearerToken(token: string) {
+  return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+}
+
+function getCloudflareCompatProviderApiKey(model?: string) {
+  if (!model) return "";
+
+  if (isCloudflareGoogleAIStudioModel(model)) {
+    return serverConfig.googleApiKey || "";
+  }
+
+  if (isCloudflareAnthropicModel(model)) {
+    return serverConfig.anthropicApiKey || "";
+  }
+
+  if (model.trim().toLowerCase().startsWith("openai/")) {
+    return serverConfig.apiKey || "";
+  }
+
+  return "";
+}
 
 export async function requestOpenai(req: NextRequest) {
   const controller = new AbortController();
@@ -68,8 +94,10 @@ export async function requestOpenai(req: NextRequest) {
       let realDeployName = "";
       serverConfig.customModels
         .split(",")
-        .filter((v) => !!v && !v.startsWith("-") && v.includes(modelName))
-        .forEach((m) => {
+        .filter(
+          (v: string) => !!v && !v.startsWith("-") && v.includes(modelName),
+        )
+        .forEach((m: string) => {
           const [fullName, displayName] = m.split("=");
           const [_, providerName] = getModelProvider(fullName);
           if (providerName === "azure" && !displayName) {
@@ -89,18 +117,68 @@ export async function requestOpenai(req: NextRequest) {
   }
 
   const fetchUrl = cloudflareAIGatewayUrl(`${baseUrl}/${path}`);
+  const isCloudflareAIRestApi =
+    !isAzure &&
+    fetchUrl.startsWith("https://api.cloudflare.com/client/v4/accounts/") &&
+    fetchUrl.includes("/ai/v1/");
+  const isCloudflareAICompatApi =
+    !isAzure &&
+    fetchUrl.startsWith("https://gateway.ai.cloudflare.com/") &&
+    fetchUrl.includes("/compat/");
+
+  let requestBody: BodyInit | null | undefined = req.body;
+  let jsonBody: ({ model?: string } & Record<string, unknown>) | undefined;
+  if (req.body) {
+    try {
+      const clonedBody = await req.text();
+      requestBody = clonedBody;
+      jsonBody = JSON.parse(clonedBody) as { model?: string } & Record<
+        string,
+        unknown
+      >;
+    } catch (e) {
+      console.error("[OpenAI] request body parse", e);
+    }
+  }
+
+  const incomingCloudflareAIGatewayAuthValue =
+    req.headers.get("cf-aig-authorization") || "";
+  const cloudflareAIGatewayAuthValue = serverConfig.cloudflareAIGatewayApiKey
+    ? asBearerToken(serverConfig.cloudflareAIGatewayApiKey)
+    : incomingCloudflareAIGatewayAuthValue;
+  const providerAuthValue =
+    isCloudflareAICompatApi && jsonBody?.model
+      ? getCloudflareCompatProviderApiKey(jsonBody.model)
+      : "";
+  const incomingProviderAuthValue = authValue;
+
+  const requestAuthValue = isCloudflareAIRestApi
+    ? cloudflareAIGatewayAuthValue || authValue
+    : isCloudflareAICompatApi
+    ? providerAuthValue
+      ? asBearerToken(providerAuthValue)
+      : cloudflareAIGatewayAuthValue || incomingProviderAuthValue
+    : authValue;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    ...(requestAuthValue && { [authHeaderName]: requestAuthValue }),
+    ...(isCloudflareAICompatApi &&
+      cloudflareAIGatewayAuthValue &&
+      requestAuthValue !== cloudflareAIGatewayAuthValue && {
+        "cf-aig-authorization": cloudflareAIGatewayAuthValue,
+      }),
+    ...(serverConfig.openaiOrgId && {
+      "OpenAI-Organization": serverConfig.openaiOrgId,
+    }),
+  };
+
   console.log("fetchUrl", fetchUrl);
   const fetchOptions: RequestInit = {
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      [authHeaderName]: authValue,
-      ...(serverConfig.openaiOrgId && {
-        "OpenAI-Organization": serverConfig.openaiOrgId,
-      }),
-    },
+    headers,
     method: req.method,
-    body: req.body,
+    body: requestBody,
     // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
     redirect: "manual",
     // @ts-ignore
@@ -109,13 +187,8 @@ export async function requestOpenai(req: NextRequest) {
   };
 
   // #1815 try to refuse gpt4 request
-  if (serverConfig.customModels && req.body) {
+  if (serverConfig.customModels && jsonBody) {
     try {
-      const clonedBody = await req.text();
-      fetchOptions.body = clonedBody;
-
-      const jsonBody = JSON.parse(clonedBody) as { model?: string };
-
       // not undefined and is false
       if (
         isModelNotavailableInServer(

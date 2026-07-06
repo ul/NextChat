@@ -25,4 +25,12 @@ describe("cloudflareAIGatewayUrl", () => {
       "https://gateway.ai.cloudflare.com/v1/acc/gw/azure-openai/resource/deploy/chat/completions";
     expect(cloudflareAIGatewayUrl(url)).toBe(url);
   });
+
+  test("rebuilds a compat gateway url by dropping the OpenAI v1 segment", () => {
+    const url =
+      "https://gateway.ai.cloudflare.com/v1/acc/gw/compat/v1/chat/completions";
+    expect(cloudflareAIGatewayUrl(url)).toBe(
+      "https://gateway.ai.cloudflare.com/v1/acc/gw/compat/chat/completions",
+    );
+  });
 });

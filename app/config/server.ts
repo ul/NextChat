@@ -8,6 +8,8 @@ declare global {
       PROXY_URL?: string; // docker only
 
       OPENAI_API_KEY?: string;
+      CLOUDFLARE_API_TOKEN?: string;
+      CLOUDFLARE_AI_GATEWAY_API_TOKEN?: string;
       CODE?: string;
 
       BASE_URL?: string;
@@ -183,6 +185,10 @@ export const getServerSideConfig = () => {
   return {
     baseUrl: process.env.BASE_URL,
     apiKey: getApiKey(process.env.OPENAI_API_KEY),
+    cloudflareAIGatewayApiKey: getApiKey(
+      process.env.CLOUDFLARE_AI_GATEWAY_API_TOKEN ||
+        process.env.CLOUDFLARE_API_TOKEN,
+    ),
     openaiOrgId: process.env.OPENAI_ORG_ID,
 
     isStability,
