@@ -10,6 +10,8 @@ declare global {
       OPENAI_API_KEY?: string;
       CLOUDFLARE_API_TOKEN?: string;
       CLOUDFLARE_AI_GATEWAY_API_TOKEN?: string;
+      CLOUDFLARE_ACCOUNT_ID?: string;
+      CLOUDFLARE_AI_GATEWAY_ID?: string;
       CODE?: string;
 
       BASE_URL?: string;
@@ -189,6 +191,7 @@ export const getServerSideConfig = () => {
       process.env.CLOUDFLARE_AI_GATEWAY_API_TOKEN ||
         process.env.CLOUDFLARE_API_TOKEN,
     ),
+    cloudflareAIGatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID,
     openaiOrgId: process.env.OPENAI_ORG_ID,
 
     isStability,

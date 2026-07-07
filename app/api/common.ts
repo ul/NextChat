@@ -32,6 +32,235 @@ function getCloudflareCompatProviderApiKey(model?: string) {
   return "";
 }
 
+type OpenAIChatMessage = {
+  role?: string;
+  content?: unknown;
+};
+
+type OpenAIChatBody = {
+  model?: string;
+  messages?: OpenAIChatMessage[];
+  temperature?: number;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+} & Record<string, unknown>;
+
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } };
+
+type GeminiContent = {
+  role: "user" | "model";
+  parts: GeminiPart[];
+};
+
+function parseCloudflareCompatGateway(fetchUrl: string) {
+  try {
+    const url = new URL(fetchUrl);
+    if (url.hostname !== "gateway.ai.cloudflare.com") return {};
+
+    const parts = url.pathname.split("/").filter(Boolean);
+    const compatIndex = parts.indexOf("compat");
+    if (parts[0] !== "v1" || compatIndex < 3) return {};
+
+    return {
+      accountId: parts[1],
+      gatewayId: parts[2],
+    };
+  } catch (e) {
+    return {};
+  }
+}
+
+function getCloudflareAIRunModel(model?: string) {
+  return model?.replace(/^google-ai-studio\//i, "google/") ?? "";
+}
+
+function dataUrlToGeminiPart(url: string): GeminiPart | undefined {
+  const match = url.match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match) return undefined;
+
+  return {
+    inlineData: {
+      mimeType: match[1],
+      data: match[2],
+    },
+  };
+}
+
+function openAIContentToGeminiParts(content: unknown): GeminiPart[] {
+  if (typeof content === "string") {
+    return content ? [{ text: content }] : [];
+  }
+
+  if (!Array.isArray(content)) return [];
+
+  const parts: GeminiPart[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      if (part) parts.push({ text: part });
+      continue;
+    }
+
+    if (!part || typeof part !== "object") continue;
+
+    const typedPart = part as {
+      type?: string;
+      text?: string;
+      image_url?: { url?: string };
+    };
+
+    if (typedPart.type === "text" && typedPart.text) {
+      parts.push({ text: typedPart.text });
+      continue;
+    }
+
+    const imageUrl = typedPart.image_url?.url;
+    if (typedPart.type === "image_url" && imageUrl) {
+      const imagePart = dataUrlToGeminiPart(imageUrl);
+      if (imagePart) parts.push(imagePart);
+    }
+  }
+
+  return parts;
+}
+
+function openAIContentToText(content: unknown) {
+  return openAIContentToGeminiParts(content)
+    .map((part) => ("text" in part ? part.text : ""))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildCloudflareGoogleAIRunBody(body: OpenAIChatBody) {
+  const systemTexts: string[] = [];
+  const contents: GeminiContent[] = [];
+
+  for (const message of body.messages ?? []) {
+    const role = (message.role || "user").toLowerCase();
+
+    if (role === "system" || role === "developer") {
+      const text = openAIContentToText(message.content);
+      if (text) systemTexts.push(text);
+      continue;
+    }
+
+    const parts = openAIContentToGeminiParts(message.content);
+    if (!parts.length) continue;
+
+    const geminiRole = role === "assistant" ? "model" : "user";
+    const previous = contents.at(-1);
+    if (previous?.role === geminiRole) {
+      previous.parts.push(...parts);
+    } else {
+      contents.push({ role: geminiRole, parts });
+    }
+  }
+
+  const generationConfig: Record<string, unknown> = {};
+  if (typeof body.temperature === "number") {
+    generationConfig.temperature = body.temperature;
+  }
+
+  const maxOutputTokens = body.max_completion_tokens ?? body.max_tokens;
+  if (typeof maxOutputTokens === "number") {
+    generationConfig.maxOutputTokens = maxOutputTokens;
+  }
+
+  return {
+    model: getCloudflareAIRunModel(body.model),
+    input: {
+      ...(systemTexts.length
+        ? { systemInstruction: { parts: [{ text: systemTexts.join("\n\n") }] } }
+        : {}),
+      contents,
+      ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+    },
+  };
+}
+
+function extractCloudflareGoogleText(body: any) {
+  const payload = body?.result ?? body;
+
+  const openAIText = payload?.choices?.at?.(0)?.message?.content;
+  if (typeof openAIText === "string") return openAIText;
+
+  const candidates = payload?.candidates;
+  if (!Array.isArray(candidates)) return "";
+
+  return (
+    candidates
+      .at(0)
+      ?.content?.parts?.map((part: any) => part?.text || "")
+      .filter(Boolean)
+      .join("\n\n") ?? ""
+  );
+}
+
+async function normalizeCloudflareAIRunResponse(res: Response) {
+  const responseText = await res.text();
+  const headers = new Headers(res.headers);
+  headers.delete("www-authenticate");
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  headers.set("X-Accel-Buffering", "no");
+  headers.set("Content-Type", "application/json");
+
+  if (!res.ok) {
+    return new Response(responseText, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    });
+  }
+
+  try {
+    const json = JSON.parse(responseText);
+    const responseErrors = Array.isArray(json?.errors)
+      ? json.errors
+      : json?.errors
+      ? [json.errors]
+      : [];
+    if (json?.error || responseErrors.length > 0 || json?.success === false) {
+      return new Response(
+        JSON.stringify({
+          error: json?.error ?? (responseErrors.length ? responseErrors : json),
+        }),
+        {
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+        },
+      );
+    }
+
+    const content = extractCloudflareGoogleText(json) || responseText;
+
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content,
+            },
+          },
+        ],
+      }),
+      {
+        status: res.status,
+        statusText: res.statusText,
+        headers,
+      },
+    );
+  } catch (e) {
+    return new Response(responseText, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    });
+  }
+}
+
 export async function requestOpenai(req: NextRequest) {
   const controller = new AbortController();
 
@@ -216,7 +445,46 @@ export async function requestOpenai(req: NextRequest) {
     }
   }
 
+  const shouldUseCloudflareAIRun =
+    isCloudflareAICompatApi &&
+    isCloudflareGoogleAIStudioModel(jsonBody?.model ?? "");
+
   try {
+    if (shouldUseCloudflareAIRun && jsonBody) {
+      const gatewayConfig = parseCloudflareCompatGateway(fetchUrl);
+      const accountId =
+        serverConfig.cloudflareAccountId || gatewayConfig.accountId;
+      const gatewayId =
+        serverConfig.cloudflareAIGatewayId || gatewayConfig.gatewayId;
+      const restAuthValue = cloudflareAIGatewayAuthValue || authValue;
+
+      if (accountId && gatewayId && restAuthValue) {
+        const res = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run`,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              Authorization: restAuthValue,
+              "cf-aig-gateway-id": gatewayId,
+            },
+            method: "POST",
+            body: JSON.stringify(
+              buildCloudflareGoogleAIRunBody(jsonBody as OpenAIChatBody),
+            ),
+            redirect: "manual",
+            signal: controller.signal,
+          },
+        );
+
+        return await normalizeCloudflareAIRunResponse(res);
+      }
+
+      console.warn(
+        "[Cloudflare AI Run] missing account id, gateway id, or Cloudflare token; falling back to compat endpoint",
+      );
+    }
+
     const res = await fetch(fetchUrl, fetchOptions);
 
     // Extract the OpenAI-Organization header from the response

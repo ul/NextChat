@@ -26,6 +26,7 @@ import {
 import { cloudflareAIGatewayUrl } from "@/app/utils/cloudflare";
 import {
   getOpenAIChatRequestParameters,
+  isCloudflareGoogleAIStudioModel,
   isOpenAIGpt5Model,
   isOpenAIReasoningModel,
 } from "@/app/utils/openai";
@@ -238,6 +239,10 @@ export class ChatGPTApi implements LLMApi {
         // Please do not ask me why not send max_tokens, no reason, this param is just shit, I dont want to explain anymore.
       };
 
+      if (isCloudflareGoogleAIStudioModel(options.config.model)) {
+        (requestPayload as RequestPayload).stream = false;
+      }
+
       if (isGpt5) {
         requestPayload["max_completion_tokens"] = modelConfig.max_tokens;
       } else if (isO1OrO3) {
@@ -262,7 +267,10 @@ export class ChatGPTApi implements LLMApi {
 
     console.log("[Request] openai payload: ", requestPayload);
 
-    const shouldStream = !isDalle3 && !!options.config.stream;
+    const shouldStream =
+      !isDalle3 &&
+      !isCloudflareGoogleAIStudioModel(options.config.model) &&
+      !!options.config.stream;
     const controller = new AbortController();
     options.onController?.(controller);
 
