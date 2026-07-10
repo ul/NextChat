@@ -83,14 +83,26 @@ describe("OpenAI model helpers", () => {
     ).toEqual({ top_p: 0.8 });
   });
 
-  test("omits deprecated sampling parameters for Cloudflare Anthropic Opus 4.7+", () => {
-    expect(
-      getOpenAIChatRequestParameters("anthropic/claude-opus-4-8", {
-        temperature: 0.5,
-        presence_penalty: 0,
-        frequency_penalty: 0,
-        top_p: 0.8,
-      }),
-    ).toEqual({});
-  });
+  test(
+    "omits deprecated sampling parameters for Cloudflare Anthropic Opus 4.7+ and Sonnet 5",
+    () => {
+      expect(
+        getOpenAIChatRequestParameters("anthropic/claude-opus-4-8", {
+          temperature: 0.5,
+          presence_penalty: 0,
+          frequency_penalty: 0,
+          top_p: 0.8,
+        }),
+      ).toEqual({});
+
+      expect(
+        getOpenAIChatRequestParameters("anthropic/claude-sonnet-5-0", {
+          temperature: 0.5,
+          presence_penalty: 0,
+          frequency_penalty: 0,
+          top_p: 0.8,
+        }),
+      ).toEqual({});
+    },
+  );
 });

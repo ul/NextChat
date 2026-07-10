@@ -1,9 +1,13 @@
 export function isAnthropicSamplingUnsupportedModel(model?: string) {
   const modelId = (model ?? "").trim().toLowerCase();
 
-  // Claude Opus 4.7+ models reject custom sampling parameters such as
-  // temperature/top_p/top_k. Leave sampling unset so the provider default is used.
-  return /claude-opus-4[-.](?:[7-9]|\d{2,})/.test(modelId);
+  // Claude Opus 4.7+ and Sonnet 5 models reject custom sampling parameters
+  // such as temperature/top_p/top_k. Leave sampling unset so the provider
+  // default is used.
+  return (
+    /claude-opus-4[-.](?:[7-9]|\d{2,})/.test(modelId) ||
+    /claude-sonnet-5(?:[-.]|$)/.test(modelId)
+  );
 }
 
 export function getAnthropicSamplingParameters(
