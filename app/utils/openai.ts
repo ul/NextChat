@@ -8,6 +8,51 @@ export function isOpenAIGpt5Model(model: string) {
   return getOpenAIModelId(model).startsWith("gpt-5");
 }
 
+export function isOpenAIResponsesOnlyModel(model: string) {
+  return /^gpt-5\.6-(terra|sol)(?:[-.]\d.*)?$/.test(getOpenAIModelId(model));
+}
+
+export function buildOpenAIResponsesRequest<T>(
+  model: string,
+  input: T[],
+  stream: boolean | undefined,
+  maxOutputTokens: number,
+) {
+  return {
+    model,
+    input,
+    stream,
+    max_output_tokens: maxOutputTokens,
+  };
+}
+
+export function extractOpenAIResponsesText(response: any): string | undefined {
+  if (typeof response?.output_text === "string") return response.output_text;
+
+  const parts = response?.output?.flatMap((item: any) =>
+    Array.isArray(item?.content) ? item.content : [],
+  );
+  if (!parts?.length) return undefined;
+
+  return parts
+    .map((part: any) =>
+      typeof part?.text === "string"
+        ? part.text
+        : typeof part?.refusal === "string"
+        ? part.refusal
+        : "",
+    )
+    .join("");
+}
+
+export function parseOpenAIResponsesSSE(text: string) {
+  const event = JSON.parse(text);
+  return event?.type === "response.output_text.delta" &&
+    typeof event?.delta === "string"
+    ? event.delta
+    : "";
+}
+
 export function isOpenAIReasoningModel(model: string) {
   const modelId = getOpenAIModelId(model);
 

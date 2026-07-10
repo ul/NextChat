@@ -25,10 +25,14 @@ import {
 } from "@/app/utils/chat";
 import { cloudflareAIGatewayUrl } from "@/app/utils/cloudflare";
 import {
+  buildOpenAIResponsesRequest,
+  extractOpenAIResponsesText,
   getOpenAIChatRequestParameters,
   isCloudflareGoogleAIStudioModel,
   isOpenAIGpt5Model,
   isOpenAIReasoningModel,
+  isOpenAIResponsesOnlyModel,
+  parseOpenAIResponsesSSE,
 } from "@/app/utils/openai";
 import { ModelSize, DalleQuality, DalleStyle } from "@/app/typing";
 
@@ -73,6 +77,13 @@ export interface RequestPayload {
   top_p?: number;
   max_tokens?: number;
   max_completion_tokens?: number;
+}
+
+export interface ResponsesRequestPayload {
+  model: string;
+  input: ChatOptions["messages"];
+  stream?: boolean;
+  max_output_tokens: number;
 }
 
 export interface DalleRequestPayload {
@@ -148,7 +159,11 @@ export class ChatGPTApi implements LLMApi {
         },
       ];
     }
-    return res.choices?.at(0)?.message?.content ?? res;
+    return (
+      extractOpenAIResponsesText(res) ??
+      res.choices?.at(0)?.message?.content ??
+      res
+    );
   }
 
   async speech(options: SpeechOptions): Promise<ArrayBuffer> {
@@ -199,11 +214,18 @@ export class ChatGPTApi implements LLMApi {
       },
     };
 
-    let requestPayload: RequestPayload | DalleRequestPayload;
+    let requestPayload:
+      | RequestPayload
+      | ResponsesRequestPayload
+      | DalleRequestPayload;
 
     const isDalle3 = _isDalle3(options.config.model);
     const isO1OrO3 = isOpenAIReasoningModel(options.config.model);
     const isGpt5 = isOpenAIGpt5Model(options.config.model);
+    const isResponsesModel =
+      modelConfig.providerName !== ServiceProvider.Azure &&
+      options.config.model.trim().toLowerCase().startsWith("openai/") &&
+      isOpenAIResponsesOnlyModel(options.config.model);
     if (isDalle3) {
       const prompt = getMessageTextContent(
         options.messages.slice(-1)?.pop() as any,
@@ -230,38 +252,52 @@ export class ChatGPTApi implements LLMApi {
       }
 
       // O1 not support image, tools (plugin in ChatGPTNextWeb) and system, stream, logprobs, temperature, top_p, n, presence_penalty, frequency_penalty yet.
-      requestPayload = {
-        messages,
-        stream: options.config.stream,
-        model: modelConfig.model,
-        ...getOpenAIChatRequestParameters(options.config.model, modelConfig),
-        // max_tokens: Math.max(modelConfig.max_tokens, 1024),
-        // Please do not ask me why not send max_tokens, no reason, this param is just shit, I dont want to explain anymore.
-      };
+      requestPayload = isResponsesModel
+        ? buildOpenAIResponsesRequest(
+            modelConfig.model,
+            messages,
+            options.config.stream,
+            modelConfig.max_tokens,
+          )
+        : {
+            messages,
+            stream: options.config.stream,
+            model: modelConfig.model,
+            ...getOpenAIChatRequestParameters(
+              options.config.model,
+              modelConfig,
+            ),
+            // max_tokens: Math.max(modelConfig.max_tokens, 1024),
+            // Please do not ask me why not send max_tokens, no reason, this param is just shit, I dont want to explain anymore.
+          };
 
       if (isCloudflareGoogleAIStudioModel(options.config.model)) {
         (requestPayload as RequestPayload).stream = false;
       }
 
-      if (isGpt5) {
-        requestPayload["max_completion_tokens"] = modelConfig.max_tokens;
+      if (isGpt5 && !isResponsesModel) {
+        (requestPayload as RequestPayload)["max_completion_tokens"] =
+          modelConfig.max_tokens;
       } else if (isO1OrO3) {
         // by default the o1/o3 models will not attempt to produce output that includes markdown formatting
         // manually add "Formatting re-enabled" developer message to encourage markdown inclusion in model responses
         // (https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/reasoning?tabs=python-secure#markdown-output)
-        requestPayload["messages"].unshift({
+        (requestPayload as RequestPayload)["messages"].unshift({
           role: "developer",
           content: "Formatting re-enabled",
         });
 
         // o1/o3 uses max_completion_tokens to control the number of tokens (https://platform.openai.com/docs/guides/reasoning#controlling-costs)
-        requestPayload["max_completion_tokens"] = modelConfig.max_tokens;
+        (requestPayload as RequestPayload)["max_completion_tokens"] =
+          modelConfig.max_tokens;
       }
-
 
       // add max_tokens to vision model
       if (visionModel && !isO1OrO3 && !isGpt5) {
-        requestPayload["max_tokens"] = Math.max(modelConfig.max_tokens, 4000);
+        (requestPayload as RequestPayload)["max_tokens"] = Math.max(
+          modelConfig.max_tokens,
+          4000,
+        );
       }
     }
 
@@ -303,16 +339,22 @@ export class ChatGPTApi implements LLMApi {
         );
       } else {
         chatPath = this.path(
-          isDalle3 ? OpenaiPath.ImagePath : OpenaiPath.ChatPath,
+          isDalle3
+            ? OpenaiPath.ImagePath
+            : isResponsesModel
+            ? OpenaiPath.ResponsesPath
+            : OpenaiPath.ChatPath,
         );
       }
       if (shouldStream) {
         let index = -1;
-        const [tools, funcs] = usePluginStore
+        const [pluginTools, pluginFuncs] = usePluginStore
           .getState()
           .getAsTools(
             useChatStore.getState().currentSession().mask?.plugin || [],
           );
+        const tools = isResponsesModel ? [] : pluginTools;
+        const funcs = isResponsesModel ? {} : pluginFuncs;
         // console.log("getAsTools", tools, funcs);
         streamWithThink(
           chatPath,
@@ -324,6 +366,13 @@ export class ChatGPTApi implements LLMApi {
           // parseSSE
           (text: string, runTools: ChatMessageTool[]) => {
             // console.log("parseSSE", text, runTools);
+            if (isResponsesModel) {
+              return {
+                isThinking: false,
+                content: parseOpenAIResponsesSSE(text),
+              };
+            }
+
             const json = JSON.parse(text);
             const choices = json.choices as Array<{
               delta: {
